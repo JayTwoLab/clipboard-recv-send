@@ -1,38 +1,93 @@
 # clipboard-recv-send
 
-클립보드와 파일 간의 데이터 송수신을 자동/수동으로 지원하는 도구 모음입니다.
+[Korean README](README.ko.md)
 
-## 개요
-이 프로젝트는 윈도우 환경에서 클립보드와 파일 간에 base64 인코딩을 활용하여 데이터를 송수신할 수 있도록 도와줍니다. 자동화 스크립트와 수동 스크립트가 모두 제공되어 다양한 상황에서 활용할 수 있습니다.
+## Overview
 
-## 디렉터리 구조
+- `clipboard-recv-send` is a collection of Python scripts that allow you to send and receive binary files (e.g., executables, images) via the clipboard in Windows environments, using base64 encoding.
+- You can transfer files using only the clipboard, without network or USB.
 
-- `automatic/` : 자동화된 송수신 스크립트
-  - `sender/clip_b64_send_win.py` : 파일을 base64로 인코딩하여 클립보드에 복사
-  - `receiver/clip_b64_recv_poll_win.py` : 클립보드의 base64 데이터를 주기적으로 감시하여 파일로 저장
-  - 각 디렉터리별 `run.cmd` : 실행을 위한 배치 파일
-- `manual/` : 수동 송수신 스크립트
-  - `sender/copy_b64_files.py` : 파일을 base64로 인코딩하여 클립보드에 복사
-  - `recv/paste_b64_files.py` : 클립보드의 base64 데이터를 파일로 저장
+<br />
 
-## 사용법
+## Structure
 
-### 자동 모드
-- 자동 송신: `automatic/sender/clip_b64_send_win.py` 실행
-- 자동 수신: `automatic/receiver/clip_b64_recv_poll_win.py` 실행
-- 각 폴더의 `run.cmd`로도 실행 가능
+- `sender/clip_b64_send_win.py`: Script to encode a file as base64 and copy it to the clipboard in sequence
+- `receiver/clip_b64_recv_poll_win.py`: Script to poll the clipboard, decode base64 data, and save it as a file
+- `run.cmd` in each folder: Command file for example execution
 
-### 수동 모드
-- 파일 복사: `manual/sender/copy_b64_files.py <파일경로>`
-- 파일 붙여넣기: `manual/recv/paste_b64_files.py <저장할_디렉터리>`
+<br />
 
-## 특징
-- base64 인코딩을 사용하여 바이너리 파일도 안전하게 송수신 가능
-- 윈도우 환경에 최적화
-- 파이썬 3 필요
+## How It Works
 
-## 라이선스
-MIT 라이선스
+- (1) The sender script encodes the specified file as base64, splits it into chunks, and copies each chunk to the clipboard.
+- (2) The receiver script periodically checks the clipboard, detects valid base64 chunks, and restores the file in order.
+- (3) Each chunk includes metadata such as order, total chunk count, CRC32, filename, and file size to ensure integrity and correct sequence.
 
-## 참고
-각 하위 폴더의 README.md를 참고하세요.
+<br />
+
+---
+
+## Usage
+
+### 1. Sending (Sender)
+
+```bat
+cd sender
+python clip_b64_send_win.py <file_to_send> --chunk 1m --interval 10
+```
+
+- Example:
+
+```bat
+python clip_b64_send_win.py npp.8.8.1.Installer.x64.exe --chunk 1m --interval 10
+```
+
+- Options:
+	- `--chunk`: base64 payload chunk size (default 4m, e.g., 1m, 512k)
+	- `--interval`: interval (seconds) between copying each chunk to the clipboard
+
+<br />
+
+---
+
+### 2. Receiving (Receiver)
+
+```bat
+cd receiver
+python clip_b64_recv_poll_win.py <output_filename> --interval 2
+```
+
+- Example:
+
+```bat
+python clip_b64_recv_poll_win.py restored.bin --interval 2
+```
+
+Options:
+- `--interval`: clipboard polling interval (seconds)
+- `--timeout`: stop if no progress for specified time (0=unlimited)
+- `--append`: append to existing file
+- `--expect-total`: force expected chunk count
+
+<br />
+
+## Notes
+
+- **Works only on Windows.**
+- If other content is copied to the clipboard, transfer may be interrupted.
+- Large files may take a long time to transfer.
+- Pay attention to time synchronization and user actions on both sender and receiver PCs.
+
+<br />
+
+## Example Scenario
+
+- (1) On the receiver side, run `cd receiver && run.cmd` or the above command to wait for restoration. **Always start the receiver first.**
+- (2) On the sender side, run `cd sender && run.cmd` or the above command to start sending the file to the clipboard.
+- (3) The file will be restored sequentially via the clipboard.
+
+<br />
+
+## License
+
+- MIT License
