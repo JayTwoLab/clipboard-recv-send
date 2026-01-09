@@ -51,150 +51,173 @@ def parse_header_line(line: str) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("output", help="output file path")
-    ap.add_argument("--interval", type=float, default=2.0, help="polling interval seconds (default 2)")
+    ap.add_argument("dir", help="output directory path")
     ap.add_argument("--timeout", type=float, default=0.0, help="stop after N seconds without progress (0=never)")
-    ap.add_argument("--append", action="store_true", help="append to existing file")
-    ap.add_argument("--expect-total", type=int, default=0, help="optional: override total chunks expectation")
     args = ap.parse_args()
 
-    out_path = Path(args.output)
-    mode = "ab" if args.append else "wb"
+    out_dir = Path(args.dir)
+    if not out_dir.exists():
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    interval = max(0.2, args.interval)
+    # interval 인자 무시, 실제 시간 기준 10초마다(5초 offset) polling
+    interval_sec = 10.0
+    offset_sec = 5.0
     timeout = max(0.0, args.timeout)
 
+    # 여러 파일 수신을 위한 상태 변수
     expected_seq = 1
-    total_chunks = args.expect_total if args.expect_total > 0 else None
+    total_chunks = None
     file_name = None
     file_size = None
-
     total_payload_b64 = 0
     total_out = 0
     buf = ""
-
     last_clip = None
     last_progress_t = time.time()
     t0 = time.time()
 
     print(f"Mode: clipboard receiver (polling, Windows) ({MAGIC})")
-    print(f"Output: {out_path}")
-    print(f"Interval: {interval:.1f}s")
+    print(f"Output directory: {out_dir}")
+    print(f"Interval: fixed 10s (5s offset)")
     if timeout > 0:
         print(f"Timeout (no progress): {timeout:.1f}s")
     print("-" * 80)
 
-    with out_path.open(mode) as out:
-        while True:
-            if timeout > 0 and (time.time() - last_progress_t) > timeout:
-                print("Stopped: timeout without progress")
-                break
+    out = None
+    while True:
+        # 다음 10초 배수+5초까지 남은 시간 계산
+        now = time.time()
+        next_tick = ((now // interval_sec) * interval_sec) + offset_sec
+        if now % interval_sec >= offset_sec:
+            next_tick += interval_sec
+        wait = next_tick - now
+        if wait > 0.01:
+            time.sleep(wait)
 
-            clip = get_clipboard_win()
-            if not clip or clip == last_clip:
-                time.sleep(interval)
-                continue
+        if timeout > 0 and (time.time() - last_progress_t) > timeout:
+            print("Stopped: timeout without progress")
+            break
 
-            last_clip = clip
+        clip = get_clipboard_win()
+        if not clip or clip == last_clip:
+            continue
 
-            if "\n" not in clip:
-                time.sleep(interval)
-                continue
+        last_clip = clip
 
-            header_line, payload = clip.split("\n", 1)
-            payload = payload.strip()
-            if not payload:
-                time.sleep(interval)
-                continue
+        if "\n" not in clip:
+            continue
 
+        header_line, payload = clip.split("\n", 1)
+        payload = payload.strip()
+        if not payload:
+            continue
+
+        try:
+            h = parse_header_line(header_line)
+        except Exception:
+            continue
+
+        seq = h["seq"]
+        if total_chunks is None or (file_name is not None and h["name"] != file_name):
+            # 새 파일 시작
+            if out:
+                if buf.strip():
+                    try:
+                        data = base64.b64decode(buf, validate=True)
+                    except binascii.Error as e:
+                        print(f"ERROR: trailing base64 invalid: {e}")
+                        return 2
+                    out.write(data)
+                    total_out += len(data)
+                out.close()
+                print("-" * 80)
+                print(f"Done. Output={out_path} written={human(total_out)}")
+            file_name = h["name"]
+            file_size = h["fsize"] if "fsize" in h else None
+            total_chunks = h["total"]
+            expected_seq = 1
+            total_payload_b64 = 0
+            total_out = 0
+            buf = ""
+            out_path = out_dir / file_name
+            out = open(out_path, "wb")
+            t0 = time.time()
+            print(f"Receiving file: {file_name} ({human(file_size)})")
+
+        if seq != expected_seq:
+            print(f"Skipped: seq mismatch (got {seq}, expected {expected_seq})")
+            continue
+
+        if h["len"] != len(payload):
+            print(f"Skipped: length mismatch (header {h['len']}, actual {len(payload)})")
+            continue
+
+        c = crc32(payload.encode("ascii")) & 0xFFFFFFFF
+        crc_hex = f"{c:08X}"
+        if crc_hex != h["crc"]:
+            print(f"Skipped: crc mismatch (header {h['crc']}, actual {crc_hex})")
+            continue
+
+        total_payload_b64 += len(payload)
+        buf += payload
+
+        dec_len = (len(buf) // 4) * 4
+        if dec_len > 0:
+            to_decode = buf[:dec_len]
+            buf = buf[dec_len:]
             try:
-                h = parse_header_line(header_line)
-            except Exception:
-                time.sleep(interval)
-                continue
+                data = base64.b64decode(to_decode, validate=True)
+            except binascii.Error as e:
+                print(f"ERROR: base64 decode failed: {e}")
+                return 2
+            out.write(data)
+            total_out += len(data)
 
-            seq = h["seq"]
-            if total_chunks is None:
-                total_chunks = h["total"]
-            if file_name is None and "name" in h:
-                file_name = h["name"]
-            if file_size is None and "fsize" in h:
-                file_size = h["fsize"]
+        expected_seq += 1
+        last_progress_t = time.time()
 
-            if seq != expected_seq:
-                # Missing or overwritten chunk
-                print(f"Skipped: seq mismatch (got {seq}, expected {expected_seq})")
-                time.sleep(interval)
-                continue
+        elapsed = time.time() - t0
+        rate = total_out / elapsed if elapsed > 0 else 0
+        prog = f"[{seq}/{total_chunks}] " if total_chunks else f"[{seq}] "
 
-            if h["len"] != len(payload):
-                print(f"Skipped: length mismatch (header {h['len']}, actual {len(payload)})")
-                time.sleep(interval)
-                continue
+        meta = []
+        if file_name:
+            meta.append(f"name={file_name}")
+        if file_size is not None:
+            meta.append(f"fsize={human(file_size)}")
+        meta_s = (" | " + " ".join(meta)) if meta else ""
 
-            c = crc32(payload.encode("ascii")) & 0xFFFFFFFF
-            crc_hex = f"{c:08X}"
-            if crc_hex != h["crc"]:
-                print(f"Skipped: crc mismatch (header {h['crc']}, actual {crc_hex})")
-                time.sleep(interval)
-                continue
+        print(
+            f"{prog}"
+            f"received_payload_b64={human(total_payload_b64)} | "
+            f"written={human(total_out)} | "
+            f"write_rate={human(rate)}/s | "
+            f"crc32={crc_hex}"
+            f"{meta_s}"
+        )
 
-            total_payload_b64 += len(payload)
-            buf += payload
-
-            dec_len = (len(buf) // 4) * 4
-            if dec_len > 0:
-                to_decode = buf[:dec_len]
-                buf = buf[dec_len:]
+        if total_chunks and seq >= total_chunks:
+            # 파일 수신 완료
+            if buf.strip():
                 try:
-                    data = base64.b64decode(to_decode, validate=True)
+                    data = base64.b64decode(buf, validate=True)
                 except binascii.Error as e:
-                    print(f"ERROR: base64 decode failed: {e}")
+                    print(f"ERROR: trailing base64 invalid: {e}")
                     return 2
                 out.write(data)
                 total_out += len(data)
-
-            expected_seq += 1
-            last_progress_t = time.time()
-
-            elapsed = time.time() - t0
-            rate = total_out / elapsed if elapsed > 0 else 0
-            prog = f"[{seq}/{total_chunks}] " if total_chunks else f"[{seq}] "
-
-            meta = []
-            if file_name:
-                meta.append(f"name={file_name}")
-            if file_size is not None:
-                meta.append(f"fsize={human(file_size)}")
-            meta_s = (" | " + " ".join(meta)) if meta else ""
-
-            print(
-                f"{prog}"
-                f"received_payload_b64={human(total_payload_b64)} | "
-                f"written={human(total_out)} | "
-                f"write_rate={human(rate)}/s | "
-                f"crc32={crc_hex}"
-                f"{meta_s}"
-            )
-
-            if total_chunks and seq >= total_chunks:
-                break
-
-            time.sleep(interval)
-
-    if buf.strip():
-        try:
-            data = base64.b64decode(buf, validate=True)
-        except binascii.Error as e:
-            print(f"ERROR: trailing base64 invalid: {e}")
-            return 2
-        with out_path.open("ab") as out:
-            out.write(data)
-        total_out += len(data)
-
-    print("-" * 80)
-    print(f"Done. Output={out_path} written={human(total_out)}")
-    return 0
+            out.close()
+            print("-" * 80)
+            print(f"Done. Output={out_path} written={human(total_out)}")
+            file_name = None
+            file_size = None
+            total_chunks = None
+            expected_seq = 1
+            total_payload_b64 = 0
+            total_out = 0
+            buf = ""
+            out = None
+            continue
 
 if __name__ == "__main__":
     raise SystemExit(main())
