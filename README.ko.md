@@ -1,5 +1,7 @@
 # clipboard-recv-send
 
+[English README](README.md)
+
 이 프로젝트는 Windows 환경에서 네트워크나 USB 없이 클립보드를 통해 바이너리 파일(실행 파일, 이미지 등)을 안전하게 전송/수신할 수 있는 Python 스크립트 모음입니다. 모든 파일 전송은 base64 인코딩을 사용합니다.
 
 ## 주요 기능
