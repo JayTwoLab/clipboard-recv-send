@@ -1,5 +1,7 @@
 # clipboard-recv-send
 
+[Korean README](README.ko.md)
+
 This project is a collection of Python scripts that allow you to safely send and receive binary files (such as executables and images) via the clipboard in Windows environments, without using network or USB. All file transfers use base64 encoding.
 
 ## Key Features
